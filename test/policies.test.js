@@ -2,8 +2,66 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, it, expect } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import policies from "../bin/lib/policies";
+
+const REPO_ROOT = path.join(import.meta.dirname, "..");
+const CLI_PATH = JSON.stringify(path.join(REPO_ROOT, "bin", "nemoclaw.js"));
+const CREDENTIALS_PATH = JSON.stringify(path.join(REPO_ROOT, "bin", "lib", "credentials.js"));
+const POLICIES_PATH = JSON.stringify(path.join(REPO_ROOT, "bin", "lib", "policies.js"));
+const REGISTRY_PATH = JSON.stringify(path.join(REPO_ROOT, "bin", "lib", "registry.js"));
+
+function runPolicyAdd(confirmAnswer) {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "nemoclaw-policy-add-"));
+  const scriptPath = path.join(tmpDir, "policy-add-check.js");
+  const script = String.raw`
+const registry = require(${REGISTRY_PATH});
+const policies = require(${POLICIES_PATH});
+const credentials = require(${CREDENTIALS_PATH});
+
+const calls = [];
+
+policies.selectFromList = async () => "pypi";
+credentials.prompt = async (message) => {
+  calls.push({ type: "prompt", message });
+  return ${JSON.stringify(confirmAnswer)};
+};
+
+registry.getSandbox = (name) => (name === "test-sandbox" ? { name } : null);
+registry.listSandboxes = () => ({ sandboxes: [{ name: "test-sandbox" }] });
+
+policies.listPresets = () => [
+  { name: "npm", description: "npm and Yarn registry access" },
+  { name: "pypi", description: "Python Package Index (PyPI) access" },
+];
+policies.getAppliedPresets = () => [];
+policies.applyPreset = (sandboxName, presetName) => {
+  calls.push({ type: "apply", sandboxName, presetName });
+};
+
+process.argv = ["node", "nemoclaw.js", "test-sandbox", "policy-add"];
+
+require(${CLI_PATH});
+
+setImmediate(() => {
+  process.stdout.write(JSON.stringify(calls));
+});
+`;
+
+  fs.writeFileSync(scriptPath, script);
+
+  return spawnSync(process.execPath, [scriptPath], {
+    cwd: REPO_ROOT,
+    encoding: "utf-8",
+    env: {
+      ...process.env,
+      HOME: tmpDir,
+    },
+  });
+}
 
 describe("policies", () => {
   describe("listPresets", () => {
@@ -94,6 +152,103 @@ describe("policies", () => {
     });
   });
 
+  describe("selectFromList", () => {
+    const ITEMS = JSON.stringify([
+      { name: "npm", description: "npm and Yarn registry access" },
+      { name: "pypi", description: "Python Package Index (PyPI) access" },
+    ]);
+
+    it("returns preset name by number via piped input", () => {
+      const script = `printf '1\\n' | node -e 'const { selectFromList } = require(${POLICIES_PATH}); selectFromList(${ITEMS}).then((n) => { process.stdout.write(n + "\\n"); }).catch((e) => { process.stderr.write(e.message); process.exit(1); });'`;
+      const result = spawnSync("bash", ["-lc", script], {
+        cwd: REPO_ROOT,
+        encoding: "utf-8",
+        timeout: 5000,
+      });
+      expect(result.status).toBe(0);
+      expect(result.stdout.trim()).toBe("npm");
+    });
+
+    it("uses the first preset as the default when input is empty", () => {
+      const script = `printf '\\n' | node -e 'const { selectFromList } = require(${POLICIES_PATH}); selectFromList(${ITEMS}).then((n) => { process.stdout.write(String(n) + "\\n"); }).catch((e) => { process.stderr.write(e.message); process.exit(1); });' 2>&1`;
+      const result = spawnSync("bash", ["-lc", script], {
+        cwd: REPO_ROOT,
+        encoding: "utf-8",
+        timeout: 5000,
+      });
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain("Choose preset [1]:");
+      expect(result.stdout.trim().split("\n").pop()).toBe("npm");
+    });
+
+    it("defaults to the first not-applied preset", () => {
+      const applied = JSON.stringify(["npm"]);
+      const script = `printf '\\n' | node -e 'const { selectFromList } = require(${POLICIES_PATH}); selectFromList(${ITEMS}, { applied: ${applied} }).then((n) => { process.stdout.write(String(n) + "\\n"); }).catch((e) => { process.stderr.write(e.message); process.exit(1); });' 2>&1`;
+      const result = spawnSync("bash", ["-lc", script], {
+        cwd: REPO_ROOT,
+        encoding: "utf-8",
+        timeout: 5000,
+      });
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain("Choose preset [2]:");
+      expect(result.stdout.trim().split("\n").pop()).toBe("pypi");
+    });
+
+    it("rejects selecting an already-applied preset", () => {
+      const applied = JSON.stringify(["npm"]);
+      const script = `printf '1\\n' | node -e 'const { selectFromList } = require(${POLICIES_PATH}); selectFromList(${ITEMS}, { applied: ${applied} }).then((n) => { process.stdout.write(String(n) + "\\n"); });' 2>&1`;
+      const result = spawnSync("bash", ["-lc", script], {
+        cwd: REPO_ROOT,
+        encoding: "utf-8",
+        timeout: 5000,
+      });
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain("Preset 'npm' is already applied.");
+      expect(result.stdout.trim().split("\n").pop()).toBe("null");
+    });
+
+    it("rejects out-of-range preset number", () => {
+      const script = `printf '99\\n' | node -e 'const { selectFromList } = require(${POLICIES_PATH}); selectFromList(${ITEMS}).then((n) => { process.stdout.write(String(n) + "\\n"); }).catch((e) => { process.stderr.write(e.message); process.exit(1); });' 2>&1`;
+      const result = spawnSync("bash", ["-lc", script], {
+        cwd: REPO_ROOT,
+        encoding: "utf-8",
+        timeout: 5000,
+      });
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain("Invalid preset number.");
+      expect(result.stdout.trim().split("\n").pop()).toBe("null");
+    });
+
+    it("rejects non-numeric preset input", () => {
+      const script = `printf 'npm\\n' | node -e 'const { selectFromList } = require(${POLICIES_PATH}); selectFromList(${ITEMS}).then((n) => { process.stdout.write(String(n) + "\\n"); }).catch((e) => { process.stderr.write(e.message); process.exit(1); });' 2>&1`;
+      const result = spawnSync("bash", ["-lc", script], {
+        cwd: REPO_ROOT,
+        encoding: "utf-8",
+        timeout: 5000,
+      });
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain("Invalid preset number.");
+      expect(result.stdout.trim().split("\n").pop()).toBe("null");
+    });
+
+    it("prints numbered list with applied markers, legend, and default prompt", () => {
+      const applied = JSON.stringify(["npm"]);
+      const script = `printf '2\\n' | node -e 'const { selectFromList } = require(${POLICIES_PATH}); selectFromList(${ITEMS}, { applied: ${applied} }).then((n) => { process.stdout.write(n + "\\n"); });' 2>&1`;
+      const result = spawnSync("bash", ["-lc", script], {
+        cwd: REPO_ROOT,
+        encoding: "utf-8",
+        timeout: 5000,
+      });
+      expect(result.status).toBe(0);
+      expect(result.stdout).toMatch(/Available presets:/);
+      expect(result.stdout).toMatch(/1\) ● npm — npm and Yarn registry access/);
+      expect(result.stdout).toMatch(/2\) ○ pypi — Python Package Index \(PyPI\) access/);
+      expect(result.stdout).toMatch(/● applied, ○ not applied/);
+      expect(result.stdout).toMatch(/Choose preset \[2\]:/);
+      expect(result.stdout.trim().split("\n").pop()).toBe("pypi");
+    });
+  });
+
   describe("preset YAML schema", () => {
     it("no preset has rules at NetworkPolicyRuleDef level", () => {
       // rules must be inside endpoints, not as sibling of endpoints/binaries
@@ -146,6 +301,36 @@ describe("policies", () => {
         expect(content.includes("binaries:")).toBe(true);
         expect(content.includes(expectedBinary)).toBe(true);
       }
+    });
+  });
+
+  describe("policy-add confirmation", () => {
+    it("prompts for confirmation before applying a preset", () => {
+      const result = runPolicyAdd("y");
+
+      expect(result.status).toBe(0);
+      const calls = JSON.parse(result.stdout.trim());
+      expect(calls).toContainEqual({
+        type: "prompt",
+        message: "  Apply 'pypi' to sandbox 'test-sandbox'? [Y/n]: ",
+      });
+      expect(calls).toContainEqual({
+        type: "apply",
+        sandboxName: "test-sandbox",
+        presetName: "pypi",
+      });
+    });
+
+    it("skips applying the preset when confirmation is declined", () => {
+      const result = runPolicyAdd("n");
+
+      expect(result.status).toBe(0);
+      const calls = JSON.parse(result.stdout.trim());
+      expect(calls).toContainEqual({
+        type: "prompt",
+        message: "  Apply 'pypi' to sandbox 'test-sandbox'? [Y/n]: ",
+      });
+      expect(calls.some((call) => call.type === "apply")).toBeFalsy();
     });
   });
 });
