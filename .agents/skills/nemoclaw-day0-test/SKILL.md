@@ -15,6 +15,7 @@ Execute DevTest test cases end-to-end with auditable proof. Read reference files
 2. Check environment  → read references/install-and-onboard.md
 3. Execute tests      → read references/tmux-testing.md
 4. Output results     → follow "Output format" below
+5. File bugs          → read references/nvbug-report.md (for any FAIL)
 ```
 
 ## Step 1: Get test case details
@@ -56,6 +57,7 @@ Use tmux to run interactive commands, capturing before/after screenshots at ever
 - Wait for the prompt before acting
 - Use isolated tmux socket (`-L tui-test`)
 - Report path: `/private/tmp/claude/report-<TASK_ID>.txt`
+- **Do NOT use `/elev on` unless the test step explicitly requires shell command execution by the agent.** Built-in agent tools (web_search, web_fetch, etc.) work without elevated mode. Only use `/elev on` when the test requires the agent to run arbitrary shell commands (e.g., curl, ls). Unnecessary privilege escalation is a test validity issue.
 
 ## Step 4: Handle wrong DevTest steps
 
@@ -155,3 +157,7 @@ Save to `/private/tmp/claude/summary.txt` AND output to the user:
 ```
 
 When DevTest steps need correction, always provide the **complete corrected steps** (not just the diff) so the user can copy-paste directly into DevTest to replace the original.
+
+### Bug report for FAILED steps (nvbug)
+
+For any task with FAIL verdicts, generate a bug report file. See `references/nvbug-report.md` for the file format, root cause analysis requirements, and key rules.
