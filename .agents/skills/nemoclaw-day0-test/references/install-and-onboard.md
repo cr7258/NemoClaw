@@ -31,8 +31,10 @@ If the output matches the version required by the test case (e.g., `v0.0.7`), **
 
 Reference docs: https://docs.nvidia.com/nemoclaw/latest/get-started/quickstart.html
 
+**IMPORTANT: Run the installer from a temporary directory.** The install script may extract files into the current working directory. Always `cd` to a temp directory first to avoid polluting the project tree:
+
 ```bash
-curl -fsSL https://www.nvidia.com/nemoclaw.sh | bash
+cd "$(mktemp -d)" && curl -fsSL https://www.nvidia.com/nemoclaw.sh | bash
 ```
 
 Onboard is always interactive — use tmux to operate it (see `references/tmux-testing.md`).
